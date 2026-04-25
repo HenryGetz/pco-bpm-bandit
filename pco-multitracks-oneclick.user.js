@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
@@ -36,7 +36,7 @@
   const MAX_CANDIDATES = 6;
   const CONCURRENCY = 3;
   const MAX_RETRIES_PER_SONG = 2;
-  const CACHE_KEY = 'tm_pco_mt_song_cache_v2';
+  const CACHE_KEY = 'tm_pco_mt_song_cache_v3';
   const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 45;
   const CACHE_MAX_ENTRIES = 1500;
   const BRAND_FONT_URL =
@@ -839,6 +839,20 @@
     );
   }
 
+  function expectedArtistFromHint(versionHint) {
+    const hint = normalizeText(versionHint);
+    if (!hint) return '';
+    if (isLikelyVersionHint(hint)) return '';
+    return hint;
+  }
+
+  function artistMatchesExpected(candidateArtist, expectedArtist) {
+    const artist = normalizeText(candidateArtist);
+    const expected = normalizeText(expectedArtist);
+    if (!artist || !expected) return false;
+    return artist === expected || artist.includes(expected) || expected.includes(artist);
+  }
+
   function computeExtraTitleTokens(target, candidate) {
     const targetTokens = new Set(String(target || '').split(' ').filter(Boolean));
     const candidateTokens = new Set(String(candidate || '').split(' ').filter(Boolean));
@@ -850,8 +864,7 @@
     const targetCore = normalizeText(stripParenthetical(row.title));
     const hint = normalizeText(row.versionHint);
     const hasHint = Boolean(hint);
-    const hintIsVersion = isLikelyVersionHint(hint);
-    const expectedArtist = !hintIsVersion && hasHint ? hint : '';
+    const expectedArtist = hasHint ? expectedArtistFromHint(hint) : '';
     const wantsLive = /\blive\b/.test(hint);
     const wantsStudio = /\bstudio\b/.test(hint);
 
@@ -951,7 +964,30 @@
       };
     }
 
-    const ranked = rankCandidates(row, candidates);
+    const expectedArtist = expectedArtistFromHint(row.versionHint);
+    let rankingPool = candidates;
+    if (expectedArtist) {
+      const artistMatched = candidates.filter((candidate) =>
+        artistMatchesExpected(candidate.artist, expectedArtist)
+      );
+      if (artistMatched.length > 0) {
+        rankingPool = artistMatched;
+        logInfo('Applying artist hard-filter before ranking', {
+          title: row.title,
+          expectedArtist,
+          kept: artistMatched.length,
+          dropped: candidates.length - artistMatched.length,
+        });
+      } else {
+        logWarn('No candidates matched expected artist; falling back to full candidate set', {
+          title: row.title,
+          expectedArtist,
+          totalCandidates: candidates.length,
+        });
+      }
+    }
+
+    const ranked = rankCandidates(row, rankingPool);
     logDebug('Ranked candidates', {
       title: row.title,
       top: ranked.slice(0, 5).map((candidate) => ({
