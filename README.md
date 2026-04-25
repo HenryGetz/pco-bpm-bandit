@@ -14,15 +14,16 @@ On a PCO plan page, it pulls your songs and opens a new page with a table:
 
 This saves worship directors from manually checking every song in MultiTracks.
 
-## 3-Minute Setup (Non-Technical)
+## Setup (Non-Technical)
 
-1. Install the **Tampermonkey** browser extension.
-2. Open this install link:
-   `https://raw.githubusercontent.com/HenryGetz/pco-bpm-bandit/main/pco-multitracks-oneclick.user.js`
-3. Tampermonkey opens an install screen.
-4. Click **Install**.
-5. Open any Planning Center plan page.
-6. Click the floating **MultiTracks BPM** button.
+1. In your browser, open the Extensions page and turn on **Developer mode** first.
+2. Install the **Tampermonkey** browser extension.
+3. Open this install link:
+   [Install PCO BPM Bandit](https://raw.githubusercontent.com/HenryGetz/pco-bpm-bandit/main/pco-multitracks-oneclick.user.js)
+4. Tampermonkey opens an install screen.
+5. Click **Install**.
+6. Open any Planning Center plan page.
+7. Click the floating **MultiTracks BPM** button.
 
 Done.
 
