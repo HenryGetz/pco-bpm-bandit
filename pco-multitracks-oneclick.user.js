@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
@@ -830,10 +830,28 @@
     return parsed;
   }
 
+  function isLikelyVersionHint(hint) {
+    const text = normalizeText(hint);
+    if (!text) return false;
+
+    return /\blive\b|\bstudio\b|\bflow\b|\bacoustic\b|\binstrumental\b|\breprise\b|\bspontaneous\b|\bmix\b|\bedit\b|\bversion\b|\barrangement\b|\bradio\b|\bdemo\b|\bloop\b|\bextended\b/.test(
+      text
+    );
+  }
+
+  function computeExtraTitleTokens(target, candidate) {
+    const targetTokens = new Set(String(target || '').split(' ').filter(Boolean));
+    const candidateTokens = new Set(String(candidate || '').split(' ').filter(Boolean));
+    return [...candidateTokens].filter((token) => !targetTokens.has(token));
+  }
+
   function rankCandidates(row, candidates) {
     const targetTitle = normalizeText(row.title);
     const targetCore = normalizeText(stripParenthetical(row.title));
     const hint = normalizeText(row.versionHint);
+    const hasHint = Boolean(hint);
+    const hintIsVersion = isLikelyVersionHint(hint);
+    const expectedArtist = !hintIsVersion && hasHint ? hint : '';
     const wantsLive = /\blive\b/.test(hint);
     const wantsStudio = /\bstudio\b/.test(hint);
 
@@ -843,21 +861,34 @@
         const titleCore = normalizeText(stripParenthetical(candidate.title));
         const artist = normalizeText(candidate.artist);
         const meta = normalizeText(`${candidate.title} ${candidate.artist} ${candidate.album}`);
+        const extraTitleTokens = computeExtraTitleTokens(targetCore || targetTitle, titleCore || title);
 
         let score = 0;
-        if (title === targetTitle) score += 220;
-        if (titleCore === targetCore) score += 140;
-        if (title.includes(targetTitle) || targetTitle.includes(title)) score += 40;
-        if (titleCore.includes(targetCore) || targetCore.includes(titleCore)) score += 30;
+        if (title === targetTitle) score += 260;
+        if (titleCore === targetCore) score += 120;
+        if (title.includes(targetTitle) || targetTitle.includes(title)) score += 32;
+        if (titleCore.includes(targetCore) || targetCore.includes(titleCore)) score += 24;
 
-        score += Math.round(jaccardSimilarity(targetCore || targetTitle, titleCore || title) * 120);
+        score += Math.round(jaccardSimilarity(targetCore || targetTitle, titleCore || title) * 95);
 
-        if (hint) {
-          if (meta.includes(hint) || hint.includes(artist)) score += 60;
+        if (expectedArtist) {
+          if (artist === expectedArtist) score += 260;
+          else if (artist.includes(expectedArtist) || expectedArtist.includes(artist)) score += 170;
+          else if (meta.includes(expectedArtist)) score += 120;
+          else score -= 120;
+        } else if (hasHint) {
+          if (meta.includes(hint)) score += 70;
+          else score -= 15;
         }
 
         if (wantsLive) score += meta.includes('live') ? 22 : -8;
         if (wantsStudio) score += meta.includes('studio') ? 18 : -8;
+
+        if (!hint.includes('flow') && /\bflow\b/.test(meta)) score -= 120;
+        if (!hint.includes('instrumental') && /\binstrumental\b/.test(meta)) score -= 55;
+        if (!hint.includes('reprise') && /\breprise\b/.test(meta)) score -= 45;
+
+        score -= Math.max(0, extraTitleTokens.length - (wantsLive ? 1 : 0)) * 16;
 
         score += Math.max(0, 12 - index);
 
