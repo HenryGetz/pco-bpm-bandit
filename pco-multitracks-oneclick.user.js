@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.3
+// @version      1.2.4
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
@@ -251,6 +251,14 @@
       .replace(/'/g, '&#039;');
   }
 
+  function escapeCssAttrValue(value) {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(String(value || ''));
+    }
+
+    return String(value || '').replace(/([\\"\]])/g, '\\$1');
+  }
+
   function formatBpm(value) {
     if (!Number.isFinite(value)) return '—';
     if (Math.abs(value - Math.round(value)) < 0.001) return String(Math.round(value));
@@ -398,6 +406,16 @@
 
   async function rememberSongCache(row, resolved) {
     if (!resolved || !resolved.multitracksUrl) return;
+
+    const expectedArtist = expectedArtistFromHint(row.versionHint);
+    if (!expectedArtist && resolved.confidence !== 'high') {
+      logDebug('Skipping cache write for ambiguous non-high-confidence match', {
+        title: row.title,
+        versionHint: row.versionHint,
+        confidence: resolved.confidence,
+      });
+      return;
+    }
 
     const cache = await ensureSongCacheLoaded();
     const now = Date.now();
@@ -919,8 +937,23 @@
   }
 
   async function resolveSongOnMultiTracks(row) {
+    const expectedArtistHint = expectedArtistFromHint(row.versionHint);
     const cached = await lookupSongCache(row);
-    if (cached) return cached;
+    if (cached && expectedArtistHint) {
+      return {
+        ...cached,
+        needsReview: false,
+        reviewReason: null,
+        candidateOptions: [],
+      };
+    }
+
+    if (cached && !expectedArtistHint) {
+      logDebug('Skipping cache for ambiguous song (missing PCO artist hint)', {
+        title: row.title,
+        versionHint: row.versionHint,
+      });
+    }
 
     const queries = [row.title, `${row.title} ${row.versionHint || ''}`]
       .map((q) => q.trim())
@@ -964,8 +997,9 @@
       };
     }
 
-    const expectedArtist = expectedArtistFromHint(row.versionHint);
+    const expectedArtist = expectedArtistHint;
     let rankingPool = candidates;
+    let usedArtistFallback = false;
     if (expectedArtist) {
       const artistMatched = candidates.filter((candidate) =>
         artistMatchesExpected(candidate.artist, expectedArtist)
@@ -979,6 +1013,7 @@
           dropped: candidates.length - artistMatched.length,
         });
       } else {
+        usedArtistFallback = true;
         logWarn('No candidates matched expected artist; falling back to full candidate set', {
           title: row.title,
           expectedArtist,
@@ -1029,6 +1064,17 @@
 
     const best = inspected[0] || null;
     const second = inspected[1] || null;
+    const confidence = confidenceFromScores(best, second, best?.completeness || 0);
+
+    const reviewReason = !expectedArtist
+      ? 'PCO linked artist/version is missing or default; please confirm the correct MultiTracks version.'
+      : usedArtistFallback
+        ? `No MultiTracks candidates matched PCO artist "${expectedArtist}". Please confirm manually.`
+        : confidence === 'low' || confidence === 'none'
+          ? 'Low-confidence automatic match; please confirm manually.'
+          : null;
+
+    const needsReview = Boolean(reviewReason);
 
     logInfo('Resolved song result', {
       title: row.title,
@@ -1062,7 +1108,18 @@
       multitracksTitle: best?.title ?? null,
       multitracksArtist: best?.artist ?? null,
       matchScore: best?.score ?? null,
-      confidence: confidenceFromScores(best, second, best?.completeness || 0),
+      confidence,
+      expectedArtistHint: expectedArtist || null,
+      needsReview,
+      reviewReason,
+      candidateOptions: inspected.slice(0, MAX_CANDIDATES).map((candidate) => ({
+        songUrl: candidate.songUrl,
+        title: candidate.title,
+        artist: candidate.artist,
+        bpm: candidate.bpm,
+        timeSignature: candidate.timeSignature,
+        score: candidate.score,
+      })),
       debugTop: inspected.slice(0, 3),
     };
   }
@@ -1227,6 +1284,14 @@
           .pill.high { background: #14532d; }
           .pill.medium { background: #78350f; }
           .pill.low { background: #7f1d1d; }
+          .review-flag { display: inline-block; margin-left: 8px; font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #7c2d12; color: #fed7aa; }
+          .review-list { display: grid; gap: 10px; }
+          .review-item { border: 1px solid #334155; border-radius: 10px; background: #020617; padding: 10px; }
+          .review-title { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+          .review-reason { font-size: 12px; color: #fda4af; margin-bottom: 8px; }
+          .review-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+          .review-controls select { min-width: 320px; max-width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px; }
+          .review-empty { color: #a5b4fc; font-size: 13px; }
         </style>
       </head>
       <body>
@@ -1249,6 +1314,7 @@
             <div id="status" class="status">Booting…</div>
           </div>
           <div class="card" id="table-wrap"></div>
+          <div class="card" id="review-wrap"></div>
         </div>
       </body>
       </html>`);
@@ -1285,11 +1351,10 @@
 
         const body = rows
           .map((row) => {
+            const reviewFlag = row.needsReview ? '<span class="review-flag">Review</span>' : '';
             const titleCell = row.multitracksUrl
-              ? `<a href="${escapeHtml(row.multitracksUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(
-                  row.title
-                )}</a>`
-              : escapeHtml(row.title);
+              ? `<a href="${escapeHtml(row.multitracksUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a>${reviewFlag}`
+              : `${escapeHtml(row.title)}${reviewFlag}`;
 
             return `<tr>
               <td class="num">${escapeHtml(row.order || row.section || '—')}</td>
@@ -1316,6 +1381,63 @@
             </thead>
             <tbody>${body}</tbody>
           </table>`;
+      },
+      renderReview(rows, onApplyCandidate) {
+        const wrap = doc.getElementById('review-wrap');
+        if (!wrap) return;
+
+        const reviewRows = rows.filter(
+          (row) => row.needsReview && Array.isArray(row.candidateOptions) && row.candidateOptions.length > 0
+        );
+
+        if (!reviewRows.length) {
+          wrap.innerHTML = `
+            <h1 style="font-size:18px;margin:0 0 8px;">Review</h1>
+            <div class="review-empty">No manual review needed. Artist and match confidence checks passed.</div>
+          `;
+          return;
+        }
+
+        const itemsHtml = reviewRows
+          .map((row) => {
+            const options = row.candidateOptions
+              .map((option, idx) => {
+                const label = `${option.title} — ${option.artist || 'Unknown'} | BPM ${formatBpm(option.bpm)} | ${
+                  option.timeSignature || '—'
+                } | score ${option.score}`;
+                return `<option value="${idx}" ${idx === 0 ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+              })
+              .join('');
+
+            return `
+              <div class="review-item">
+                <div class="review-title">#${escapeHtml(row.order || row.section || '—')} ${escapeHtml(row.title)}</div>
+                <div class="review-reason">${escapeHtml(row.reviewReason || 'Please confirm this match.')}</div>
+                <div class="review-controls">
+                  <select data-review-select="${escapeHtml(row.id)}">${options}</select>
+                  <button class="alt" data-review-apply="${escapeHtml(row.id)}">Use Selected Match</button>
+                </div>
+              </div>
+            `;
+          })
+          .join('');
+
+        wrap.innerHTML = `
+          <h1 style="font-size:18px;margin:0 0 8px;">Review Needed (${reviewRows.length})</h1>
+          <div class="review-list">${itemsHtml}</div>
+        `;
+
+        wrap.querySelectorAll('[data-review-apply]').forEach((button) => {
+          button.addEventListener('click', () => {
+            const rowId = button.getAttribute('data-review-apply');
+            const safeRowId = escapeCssAttrValue(rowId);
+            const select = wrap.querySelector(`[data-review-select="${safeRowId}"]`);
+            if (!select) return;
+            const candidateIndex = Number(select.value);
+            if (!Number.isFinite(candidateIndex)) return;
+            onApplyCandidate?.(rowId, candidateIndex);
+          });
+        });
       },
       onCopyMarkdown(getText) {
         const btn = doc.getElementById('copy-md');
@@ -1446,7 +1568,13 @@
             return;
           }
 
-          const icon = row.multitracksUrl ? (row.confidence === 'high' ? '✓' : '~') : '✗';
+          const icon = row.needsReview
+            ? '?'
+            : row.multitracksUrl
+              ? row.confidence === 'high'
+                ? '✓'
+                : '~'
+              : '✗';
           report.appendStatus(
             `[${doneCount}] ${icon} ${row.title} | key=${row.key || '—'} | bpm=${formatBpm(
               row.bpm
@@ -1469,10 +1597,59 @@
       });
 
       const ordered = songs.map((song) => resultsMap[song.id] || { ...song, bpm: null, timeSignature: null });
-      const markdown = buildMarkdownTable(ordered);
+      let currentRows = ordered.map((row) => ({ ...row }));
+
+      const persistLatestPlan = async () => {
+        await gm.setValues({
+          [`tm_pco_mt_last_plan_${planId}`]: {
+            generatedAt: new Date().toISOString(),
+            planId,
+            rows: currentRows,
+            markdown: buildMarkdownTable(currentRows),
+          },
+        });
+      };
+
+      const applyManualCandidate = (rowId, candidateIndex) => {
+        const targetRow = currentRows.find((row) => String(row.id) === String(rowId));
+        if (!targetRow) return;
+
+        const options = Array.isArray(targetRow.candidateOptions) ? targetRow.candidateOptions : [];
+        const selected = options[candidateIndex];
+        if (!selected) return;
+
+        targetRow.multitracksUrl = selected.songUrl || null;
+        targetRow.multitracksTitle = selected.title || null;
+        targetRow.multitracksArtist = selected.artist || null;
+        targetRow.bpm = selected.bpm ?? null;
+        targetRow.timeSignature = selected.timeSignature ?? null;
+        targetRow.matchScore = selected.score ?? null;
+        targetRow.confidence = 'manual';
+        targetRow.needsReview = false;
+        targetRow.reviewReason = 'Manually selected by user.';
+        targetRow.manualOverride = true;
+
+        logInfo('Manual candidate applied from review UI', {
+          rowId,
+          title: targetRow.title,
+          selected,
+        });
+
+        report.renderTable(currentRows);
+        report.renderReview(currentRows, applyManualCandidate);
+
+        persistLatestPlan().catch((error) => {
+          logWarn('Failed to persist manual override', {
+            rowId,
+            title: targetRow.title,
+            error: error?.message || String(error),
+          });
+        });
+      };
+
       logInfo('Step 4/4: render completed rows', {
         planId,
-        orderedRows: ordered.map((row) => ({
+        orderedRows: currentRows.map((row) => ({
           section: row.section,
           title: row.title,
           key: row.key,
@@ -1480,27 +1657,23 @@
           timeSignature: row.timeSignature,
           confidence: row.confidence,
           multitracksUrl: row.multitracksUrl,
+          needsReview: row.needsReview,
+          reviewReason: row.reviewReason,
         })),
       });
 
       report.setMeta(
-        `Plan ${planId} — Done in ${Math.round((Date.now() - startedAt) / 1000)}s | ${ordered.length} rows`
+        `Plan ${planId} — Done in ${Math.round((Date.now() - startedAt) / 1000)}s | ${currentRows.length} rows`
       );
       report.appendStatus('[4/4] Rendering table… done.');
-      report.setProgress(ordered.length, ordered.length, 'Done');
-      report.renderTable(ordered);
-      report.onCopyMarkdown(() => markdown);
-      report.onCopyJson(() => JSON.stringify(ordered, null, 2));
+      report.setProgress(currentRows.length, currentRows.length, 'Done');
+      report.renderTable(currentRows);
+      report.renderReview(currentRows, applyManualCandidate);
+      report.onCopyMarkdown(() => buildMarkdownTable(currentRows));
+      report.onCopyJson(() => JSON.stringify(currentRows, null, 2));
 
       // Keep data in storage so you can inspect/reuse from another tab quickly.
-      await gm.setValues({
-        [`tm_pco_mt_last_plan_${planId}`]: {
-          generatedAt: new Date().toISOString(),
-          planId,
-          rows: ordered,
-          markdown,
-        },
-      });
+      await persistLatestPlan();
     } catch (error) {
       report.setMeta(`Plan ${planId} — Failed`);
       report.appendStatus(`[error] ${error.message || String(error)}`);
