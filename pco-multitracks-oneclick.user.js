@@ -36,7 +36,7 @@
   const MAX_CANDIDATES = 6;
   const CONCURRENCY = 3;
   const MAX_RETRIES_PER_SONG = 2;
-  const CACHE_KEY = 'tm_pco_mt_song_cache_v3';
+  const CACHE_KEY = 'tm_pco_mt_song_cache_v4';
   const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 45;
   const CACHE_MAX_ENTRIES = 1500;
   const BRAND_FONT_URL =
@@ -299,14 +299,26 @@
     doc.head.appendChild(link);
   }
 
-  function cacheKeyForSong(row) {
-    return `song::${normalizeText(row.title)}::${normalizeText(row.versionHint || '')}::${normalizeText(
-      row.key || ''
-    )}`;
+  function exactCacheToken(value) {
+    return encodeURIComponent(String(value || '').trim());
   }
 
-  function cacheFallbackKeyForSong(row) {
-    return `song::${normalizeText(row.title)}::`;
+  function cacheKeysForSong(row) {
+    const keys = [];
+    const songId = String(row.songId || '').trim();
+    const arrangementId = String(row.arrangementId || '').trim();
+    const title = String(row.title || '').trim();
+    const versionHint = String(row.versionHint || '').trim();
+
+    if (songId || arrangementId) {
+      keys.push(`song::ids::song=${exactCacheToken(songId)}::arrangement=${exactCacheToken(arrangementId)}`);
+    }
+
+    if (title || versionHint) {
+      keys.push(`song::exact::title=${exactCacheToken(title)}::version=${exactCacheToken(versionHint)}`);
+    }
+
+    return [...new Set(keys)];
   }
 
   async function ensureSongCacheLoaded() {
@@ -361,9 +373,16 @@
     const cache = await ensureSongCacheLoaded();
     const now = Date.now();
 
-    const primaryKey = cacheKeyForSong(row);
-    const fallbackKey = cacheFallbackKeyForSong(row);
-    const candidates = [primaryKey, fallbackKey];
+    const candidates = cacheKeysForSong(row);
+    if (!candidates.length) {
+      logDebug('Song cache skipped: no lookup keys available', {
+        title: row.title,
+        versionHint: row.versionHint,
+        songId: row.songId || null,
+        arrangementId: row.arrangementId || null,
+      });
+      return null;
+    }
 
     for (const key of candidates) {
       const entry = cache[key];
@@ -400,7 +419,13 @@
       };
     }
 
-    logDebug('Song cache miss', { title: row.title, primaryKey, fallbackKey });
+    logDebug('Song cache miss', {
+      title: row.title,
+      versionHint: row.versionHint,
+      songId: row.songId || null,
+      arrangementId: row.arrangementId || null,
+      candidates,
+    });
     return null;
   }
 
@@ -419,8 +444,16 @@
 
     const cache = await ensureSongCacheLoaded();
     const now = Date.now();
-    const key = cacheKeyForSong(row);
-    const fallbackKey = cacheFallbackKeyForSong(row);
+    const keys = cacheKeysForSong(row);
+    if (!keys.length) {
+      logDebug('Song cache skipped: no write keys available', {
+        title: row.title,
+        versionHint: row.versionHint,
+        songId: row.songId || null,
+        arrangementId: row.arrangementId || null,
+      });
+      return;
+    }
 
     const value = {
       bpm: resolved.bpm ?? null,
@@ -432,26 +465,21 @@
       matchScore: resolved.matchScore ?? null,
     };
 
-    cache[key] = {
-      ts: now,
-      hits: Number(cache[key]?.hits || 0),
-      value,
-    };
-
-    // Title-level fallback is only trusted for high-confidence matches.
-    if (value.confidence === 'high' && (!cache[fallbackKey] || Number(cache[fallbackKey].hits || 0) < 2)) {
-      cache[fallbackKey] = {
+    keys.forEach((key) => {
+      cache[key] = {
         ts: now,
-        hits: Number(cache[fallbackKey]?.hits || 0),
+        hits: Number(cache[key]?.hits || 0),
         value,
       };
-    }
+    });
 
     songCacheDirty = true;
     logDebug('Song cached', {
       title: row.title,
-      key,
-      fallbackKey,
+      versionHint: row.versionHint,
+      songId: row.songId || null,
+      arrangementId: row.arrangementId || null,
+      keys,
       bpm: value.bpm,
       timeSignature: value.timeSignature,
       confidence: value.confidence,
@@ -739,6 +767,7 @@
       if (section === 0) section = 1;
 
       const title = getByPath(item, ['attributes', 'title']) || 'Untitled';
+      const songRel = getByPath(item, ['relationships', 'song', 'data']);
       const arrangementRel = getByPath(item, ['relationships', 'arrangement', 'data']);
       const arrangementObj = arrangementRel
         ? includedMap.get(`${arrangementRel.type}:${arrangementRel.id}`)
@@ -755,6 +784,8 @@
         title,
         key,
         versionHint,
+        songId: songRel?.id || null,
+        arrangementId: arrangementRel?.id || null,
       });
 
       logDebug('Extracted song row', {
@@ -763,6 +794,8 @@
         title,
         key,
         versionHint,
+        songId: songRel?.id || null,
+        arrangementId: arrangementRel?.id || null,
       });
     }
 
