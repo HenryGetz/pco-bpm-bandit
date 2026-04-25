@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.4
+// @version      1.2.5
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
