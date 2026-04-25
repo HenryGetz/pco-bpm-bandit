@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.5
+// @version      1.2.6
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
@@ -969,6 +969,23 @@
     return 'low';
   }
 
+  function candidatesShareRhythm(candidates) {
+    const complete = (Array.isArray(candidates) ? candidates : []).filter(
+      (candidate) => Number.isFinite(candidate?.bpm) && String(candidate?.timeSignature || '').trim()
+    );
+
+    if (complete.length < 2) return false;
+
+    const baseBpm = Number(Number(complete[0].bpm).toFixed(2));
+    const baseSig = String(complete[0].timeSignature || '').trim();
+
+    return complete.every((candidate) => {
+      const sig = String(candidate.timeSignature || '').trim();
+      const bpm = Number(Number(candidate.bpm).toFixed(2));
+      return sig === baseSig && bpm === baseBpm;
+    });
+  }
+
   async function resolveSongOnMultiTracks(row) {
     const expectedArtistHint = expectedArtistFromHint(row.versionHint);
     const cached = await lookupSongCache(row);
@@ -1099,13 +1116,34 @@
     const second = inspected[1] || null;
     const confidence = confidenceFromScores(best, second, best?.completeness || 0);
 
-    const reviewReason = !expectedArtist
+    const candidateOptions = inspected.slice(0, MAX_CANDIDATES).map((candidate) => ({
+      songUrl: candidate.songUrl,
+      title: candidate.title,
+      artist: candidate.artist,
+      bpm: candidate.bpm,
+      timeSignature: candidate.timeSignature,
+      score: candidate.score,
+    }));
+
+    const sharedRhythm = candidatesShareRhythm(candidateOptions);
+
+    let reviewReason = !expectedArtist
       ? 'PCO linked artist/version is missing or default; please confirm the correct MultiTracks version.'
       : usedArtistFallback
         ? `No MultiTracks candidates matched PCO artist "${expectedArtist}". Please confirm manually.`
         : confidence === 'low' || confidence === 'none'
           ? 'Low-confidence automatic match; please confirm manually.'
           : null;
+
+    if (reviewReason && sharedRhythm) {
+      logInfo('Suppressing review: top candidates share identical BPM/time signature', {
+        title: row.title,
+        bpm: candidateOptions[0]?.bpm ?? null,
+        timeSignature: candidateOptions[0]?.timeSignature ?? null,
+        options: candidateOptions.length,
+      });
+      reviewReason = null;
+    }
 
     const needsReview = Boolean(reviewReason);
 
@@ -1145,14 +1183,7 @@
       expectedArtistHint: expectedArtist || null,
       needsReview,
       reviewReason,
-      candidateOptions: inspected.slice(0, MAX_CANDIDATES).map((candidate) => ({
-        songUrl: candidate.songUrl,
-        title: candidate.title,
-        artist: candidate.artist,
-        bpm: candidate.bpm,
-        timeSignature: candidate.timeSignature,
-        score: candidate.score,
-      })),
+      candidateOptions,
       debugTop: inspected.slice(0, 3),
     };
   }
