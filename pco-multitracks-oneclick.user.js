@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.6
+// @version      1.2.7
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
 // @match        https://services.planningcenteronline.com/plans/*
 // @match        https://services.planningcenter.com/plans/*
@@ -969,6 +969,19 @@
     return 'low';
   }
 
+  function sameRhythm(left, right) {
+    if (!left || !right) return false;
+    const leftSig = String(left.timeSignature || '').trim();
+    const rightSig = String(right.timeSignature || '').trim();
+    if (!leftSig || !rightSig) return false;
+
+    const leftBpm = Number(Number(left.bpm).toFixed(2));
+    const rightBpm = Number(Number(right.bpm).toFixed(2));
+    if (!Number.isFinite(leftBpm) || !Number.isFinite(rightBpm)) return false;
+
+    return leftSig === rightSig && leftBpm === rightBpm;
+  }
+
   function candidatesShareRhythm(candidates) {
     const complete = (Array.isArray(candidates) ? candidates : []).filter(
       (candidate) => Number.isFinite(candidate?.bpm) && String(candidate?.timeSignature || '').trim()
@@ -976,14 +989,23 @@
 
     if (complete.length < 2) return false;
 
-    const baseBpm = Number(Number(complete[0].bpm).toFixed(2));
-    const baseSig = String(complete[0].timeSignature || '').trim();
+    const first = complete[0];
+    const second = complete[1];
+    const firstScore = Number(first?.score || 0);
+    const secondScore = Number(second?.score || 0);
 
-    return complete.every((candidate) => {
-      const sig = String(candidate.timeSignature || '').trim();
-      const bpm = Number(Number(candidate.bpm).toFixed(2));
-      return sig === baseSig && bpm === baseBpm;
-    });
+    // If top two serious candidates agree on rhythm, review is unnecessary for BPM/time-sig use.
+    if (firstScore >= 100 && secondScore >= 100 && sameRhythm(first, second)) {
+      return true;
+    }
+
+    // Otherwise, look for a tight high-score cluster near the winner and require consensus there.
+    const topScore = Number(first?.score || 0);
+    const competitiveFloor = Math.max(100, topScore - 25);
+    const competitive = complete.filter((candidate) => Number(candidate?.score || 0) >= competitiveFloor).slice(0, 3);
+    if (competitive.length < 2) return false;
+
+    return competitive.every((candidate) => sameRhythm(candidate, competitive[0]));
   }
 
   async function resolveSongOnMultiTracks(row) {
