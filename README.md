@@ -1,34 +1,53 @@
 # PCO BPM Bandit
 
-Tampermonkey userscript for Planning Center plans that builds a MultiTracks BPM/Time Signature table in one click.
+## What This Is
 
-## Install
+This is a 1-click helper for Planning Center.
 
-- Direct install URL (Tampermonkey):
-  `https://raw.githubusercontent.com/HenryGetz/pco-bpm-bandit/main/pco-multitracks-oneclick.user.js`
+On a PCO plan page, it pulls your songs and opens a new page with a table:
 
-Open that link in your browser with Tampermonkey installed and click install.
+- Song
+- Version (from MultiTracks)
+- Key
+- BPM
+- Time Signature
 
-## Auto-Update Model
+This saves worship directors from manually checking every song in MultiTracks.
 
-The script includes:
+## 3-Minute Setup (Non-Technical)
 
-- `@updateURL`
-- `@downloadURL`
+1. Install the **Tampermonkey** browser extension.
+2. Open this install link:
+   `https://raw.githubusercontent.com/HenryGetz/pco-bpm-bandit/main/pco-multitracks-oneclick.user.js`
+3. Tampermonkey opens an install screen.
+4. Click **Install**.
+5. Open any Planning Center plan page.
+6. Click the floating **MultiTracks BPM** button.
 
-Both point to the raw file on `main`. Tampermonkey checks for newer `@version` values and updates automatically.
+Done.
 
-## One-Place Update Workflow
+## How To Use
 
-1. Edit `pco-multitracks-oneclick.user.js`
-2. Bump `@version` (required for client updates)
-3. Commit and push to `main`
+1. Go to a PCO plan page.
+2. Click **MultiTracks BPM**.
+3. Wait a few seconds.
+4. A new page opens with the full table.
+5. Use **Copy Markdown** if you want to paste the table somewhere.
 
-That is it. All installed users get the update via Tampermonkey background checks.
+## Important Notes
 
-## Dev Validation
+- You must be logged in to Planning Center in your browser.
+- The tool reads plan data and looks up matching songs on MultiTracks.
+- It does **not** edit your PCO plan.
 
-```bash
-node --check pco-multitracks-oneclick.user.js
-```
+## Auto Updates (Already Built In)
 
+If you installed from the raw GitHub link above, Tampermonkey auto-checks for updates.
+
+When a new version is published, users get it automatically.
+
+## Troubleshooting
+
+- **No button appears**: Refresh the PCO page once.
+- **Popup blocked**: Allow popups for Planning Center.
+- **Wrong match**: Click the song link in the table to verify MultiTracks result.
