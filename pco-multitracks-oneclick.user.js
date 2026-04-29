@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         PCO -> MultiTracks One-Click Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
+// @version      1.2.8
 // @description  Adds a one-click button on PCO plan pages that builds a Key/BPM/Time-Sig table sourced from MultiTracks and opens it in a new tab.
-// @match        https://services.planningcenteronline.com/plans/*
-// @match        https://services.planningcenter.com/plans/*
+// @match        https://services.planningcenteronline.com/*
+// @match        https://services.planningcenter.com/*
 // @homepageURL  https://github.com/HenryGetz/pco-bpm-bandit
 // @supportURL   https://github.com/HenryGetz/pco-bpm-bandit/issues
 // @updateURL    https://raw.githubusercontent.com/HenryGetz/pco-bpm-bandit/main/pco-multitracks-oneclick.user.js
@@ -36,6 +36,8 @@
   const MAX_CANDIDATES = 6;
   const CONCURRENCY = 3;
   const MAX_RETRIES_PER_SONG = 2;
+  const ROUTE_WATCH_INTERVAL_MS = 1200;
+  const ROUTE_WATCH_MUTATION_DEBOUNCE_MS = 180;
   const CACHE_KEY = 'tm_pco_mt_song_cache_v4';
   const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 45;
   const CACHE_MAX_ENTRIES = 1500;
@@ -100,6 +102,10 @@
     serviceTypeIdByPlanId: new Map(),
     itemsPayloadByPlanId: new Map(),
   };
+
+  let routeWatcherStarted = false;
+  let routeSyncTimer = null;
+  let lastObservedHref = '';
 
   let songCache = null;
   let songCacheDirty = false;
@@ -1776,8 +1782,31 @@
     }
   }
 
+  function isPlanPageUrl(urlText = location.href) {
+    try {
+      const parsed = new URL(String(urlText || ''), location.origin);
+      const host = parsed.hostname.toLowerCase();
+      if (host !== 'services.planningcenteronline.com' && host !== 'services.planningcenter.com') {
+        return false;
+      }
+      return /^\/plans\/\d+(?:\/|$)/.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function unmountButton() {
+    const existing = document.querySelector('.tm-mt-btn');
+    if (existing) {
+      existing.remove();
+      logDebug('Unmounted floating button');
+    }
+  }
+
   function mountButton() {
+    if (!isPlanPageUrl(location.href)) return;
     if (document.querySelector('.tm-mt-btn')) return;
+    if (!document.body) return;
 
     const button = document.createElement('button');
     button.className = 'tm-mt-btn';
@@ -1798,6 +1827,82 @@
     });
 
     document.body.appendChild(button);
+    logDebug('Mounted floating button', { href: location.href });
+  }
+
+  function syncButtonForRoute(reason) {
+    const shouldShow = isPlanPageUrl(location.href);
+    const hasButton = Boolean(document.querySelector('.tm-mt-btn'));
+
+    if (shouldShow && !hasButton) {
+      logInfo('Route eligible for button; mounting', { reason, href: location.href });
+      mountButton();
+      return;
+    }
+
+    if (!shouldShow && hasButton) {
+      logInfo('Route not eligible for button; unmounting', { reason, href: location.href });
+      unmountButton();
+    }
+  }
+
+  function scheduleRouteSync(reason) {
+    if (routeSyncTimer) clearTimeout(routeSyncTimer);
+    routeSyncTimer = setTimeout(() => {
+      const currentHref = String(location.href || '');
+      if (currentHref !== lastObservedHref) {
+        logInfo('Detected route change', {
+          reason,
+          from: lastObservedHref,
+          to: currentHref,
+        });
+        lastObservedHref = currentHref;
+      }
+      syncButtonForRoute(reason);
+    }, ROUTE_WATCH_MUTATION_DEBOUNCE_MS);
+  }
+
+  function startRouteWatcher() {
+    if (routeWatcherStarted) return;
+    routeWatcherStarted = true;
+    lastObservedHref = String(location.href || '');
+
+    const wrapHistoryMethod = (methodName) => {
+      const original = history[methodName];
+      if (typeof original !== 'function') return;
+      try {
+        history[methodName] = function wrappedHistoryMethod(...args) {
+          const result = original.apply(this, args);
+          scheduleRouteSync(`history.${methodName}`);
+          return result;
+        };
+      } catch {
+        logWarn('Could not patch history method for route watching', { methodName });
+      }
+    };
+
+    wrapHistoryMethod('pushState');
+    wrapHistoryMethod('replaceState');
+
+    window.addEventListener('popstate', () => scheduleRouteSync('popstate'));
+    window.addEventListener('hashchange', () => scheduleRouteSync('hashchange'));
+
+    const observer = new MutationObserver(() => scheduleRouteSync('mutation'));
+    if (document.documentElement) {
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    setInterval(() => scheduleRouteSync('interval'), ROUTE_WATCH_INTERVAL_MS);
+
+    window.addEventListener(
+      'beforeunload',
+      () => {
+        observer.disconnect();
+      },
+      { once: true }
+    );
+
+    logInfo('Started SPA route watcher', { href: lastObservedHref });
   }
 
   function init() {
@@ -1805,8 +1910,9 @@
     ensureBrandFontLoaded(document);
     installFetchInterceptor();
     addUserscriptStyles();
-    mountButton();
-    window.addEventListener('load', mountButton, { once: true });
+    syncButtonForRoute('init');
+    startRouteWatcher();
+    window.addEventListener('load', () => syncButtonForRoute('window.load'), { once: true });
     logInfo('Userscript init complete');
   }
 
